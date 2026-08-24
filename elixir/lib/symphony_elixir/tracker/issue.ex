@@ -59,9 +59,25 @@ defmodule SymphonyElixir.Tracker.Issue do
 
   def routable?(%__MODULE__{}, _required_labels), do: false
 
+  @doc """
+  Reports whether an issue has the identity fields required by the scheduler.
+
+  Adapters may carry optional provider fields, but the scheduler cannot safely
+  dispatch an issue without these four nonblank values.
+  """
+  @spec valid?(t()) :: boolean()
+  def valid?(%__MODULE__{} = issue) do
+    Enum.all?([issue.id, issue.identifier, issue.title, issue.state], &present_string?/1)
+  end
+
+  def valid?(_issue), do: false
+
   defp normalize_label(label) when is_binary(label) do
     label
     |> String.trim()
     |> String.downcase()
   end
+
+  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_string?(_value), do: false
 end

@@ -63,6 +63,28 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  @spec emergency_stop_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
+  def emergency_stop_payload(orchestrator) do
+    case Orchestrator.emergency_stop(orchestrator) do
+      :unavailable ->
+        {:error, :unavailable}
+
+      payload ->
+        {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
+    end
+  end
+
+  @spec resume_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
+  def resume_payload(orchestrator) do
+    case Orchestrator.resume(orchestrator) do
+      :unavailable ->
+        {:error, :unavailable}
+
+      payload ->
+        {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
+    end
+  end
+
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
     %{
       issue_identifier: issue_identifier,

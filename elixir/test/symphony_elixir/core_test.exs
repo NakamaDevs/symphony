@@ -1302,6 +1302,14 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, []} = Client.fetch_issues_by_states([])
   end
 
+  test "issue identity validation requires stable scheduler fields" do
+    assert Issue.valid?(%Issue{id: "issue-1", identifier: "MT-1", title: "Ship it", state: "Todo"})
+
+    refute Issue.valid?(%Issue{id: "issue-1", identifier: "MT-1", title: " ", state: "Todo"})
+    refute Issue.valid?(%Issue{id: "issue-1", identifier: "MT-1", title: "Ship it", state: nil})
+    refute Issue.valid?(nil)
+  end
+
   test "prompt builder renders issue and attempt values from workflow template" do
     workflow_prompt =
       "Ticket {{ issue.identifier }} {{ issue.title }} labels={{ issue.labels }} attempt={{ attempt }}"

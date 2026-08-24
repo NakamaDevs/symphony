@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      dispatch_paused: false,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.Orchestrator do
           tick_timer_ref: nil,
           tick_token: nil,
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
+          dispatch_paused: false,
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
@@ -254,6 +256,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
+    if state.dispatch_paused == true do
+      Logger.warning("Dispatch is paused; skipping tracker poll")
+      state
+    else
+      do_maybe_dispatch(state)
+    end
+  end
+
+  defp do_maybe_dispatch(%State{} = state) do
     state =
       state
       |> reconcile_running_issues()
@@ -1388,6 +1399,30 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  @spec emergency_stop() :: map() | :unavailable
+  def emergency_stop, do: emergency_stop(__MODULE__)
+
+  @spec emergency_stop(GenServer.server()) :: map() | :unavailable
+  def emergency_stop(server) do
+    if Process.whereis(server) do
+      GenServer.call(server, :emergency_stop)
+    else
+      :unavailable
+    end
+  end
+
+  @spec resume() :: map() | :unavailable
+  def resume, do: resume(__MODULE__)
+
+  @spec resume(GenServer.server()) :: map() | :unavailable
+  def resume(server) do
+    if Process.whereis(server) do
+      GenServer.call(server, :resume)
+    else
+      :unavailable
+    end
+  end
+
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
@@ -1478,6 +1513,7 @@ defmodule SymphonyElixir.Orchestrator do
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
+         dispatch_paused?: state.dispatch_paused == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
        }
@@ -1497,6 +1533,61 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  def handle_call(:emergency_stop, _from, state) do
+    running_count = map_size(state.running)
+    blocked_count = map_size(state.blocked)
+    retrying_count = map_size(state.retry_attempts)
+
+    state =
+      Enum.reduce(Map.keys(state.running), state, fn issue_id, state_acc ->
+        terminate_running_issue(state_acc, issue_id, true)
+      end)
+
+    Enum.each(state.retry_attempts, fn {_issue_id, retry} ->
+      cancel_timer(Map.get(retry, :timer_ref))
+    end)
+
+    state =
+      Enum.reduce(Map.keys(state.blocked), state, fn issue_id, state_acc ->
+        metadata = Map.get(state_acc.blocked, issue_id, %{})
+        cleanup_issue_workspace(Map.get(metadata, :issue), metadata)
+        release_issue_claim(state_acc, issue_id)
+      end)
+
+    cancel_timer(state.tick_timer_ref)
+
+    state = %{
+      state
+      | retry_attempts: %{},
+        claimed: MapSet.new(),
+        blocked: %{},
+        dispatch_paused: true,
+        poll_check_in_progress: false,
+        tick_timer_ref: nil,
+        tick_token: nil,
+        next_poll_due_at_ms: nil
+    }
+
+    Logger.warning("Emergency stop completed; dispatch is paused")
+
+    {:reply,
+     %{
+       stopped: true,
+       paused: true,
+       running: running_count,
+       blocked: blocked_count,
+       retrying: retrying_count,
+       requested_at: DateTime.utc_now()
+     }, state}
+  end
+
+  def handle_call(:resume, _from, state) do
+    state = %{state | dispatch_paused: false}
+    state = schedule_tick(state, 0)
+    Logger.info("Dispatch resumed")
+    {:reply, %{resumed: true, paused: false, requested_at: DateTime.utc_now()}, state}
   end
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
@@ -1580,9 +1671,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
-    if is_reference(state.tick_timer_ref) do
-      Process.cancel_timer(state.tick_timer_ref)
-    end
+    cancel_timer(state.tick_timer_ref)
 
     tick_token = make_ref()
     timer_ref = Process.send_after(self(), {:tick, tick_token}, delay_ms)
@@ -1594,6 +1683,9 @@ defmodule SymphonyElixir.Orchestrator do
         next_poll_due_at_ms: System.monotonic_time(:millisecond) + delay_ms
     }
   end
+
+  defp cancel_timer(timer_ref) when is_reference(timer_ref), do: Process.cancel_timer(timer_ref)
+  defp cancel_timer(_timer_ref), do: :ok
 
   defp schedule_poll_cycle_start do
     :timer.send_after(@poll_transition_render_delay_ms, self(), :run_poll_cycle)

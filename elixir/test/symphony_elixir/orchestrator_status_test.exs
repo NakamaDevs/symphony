@@ -21,6 +21,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "emergency stop pauses dispatch and resume re-enables polling" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    orchestrator_name = Module.concat(__MODULE__, :EmergencyStopOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert %{stopped: true, paused: true, running: 0, blocked: 0, retrying: 0} =
+             Orchestrator.emergency_stop(orchestrator_name)
+
+    assert %{polling: %{dispatch_paused?: true, next_poll_in_ms: nil}} =
+             Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    assert %{resumed: true, paused: false} = Orchestrator.resume(orchestrator_name)
+    assert %{polling: %{dispatch_paused?: false}} = Orchestrator.snapshot(orchestrator_name, 1_000)
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 

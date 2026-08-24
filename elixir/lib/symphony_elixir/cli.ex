@@ -3,7 +3,8 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{LogFile, Workflow}
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
@@ -11,6 +12,7 @@ defmodule SymphonyElixir.CLI do
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
           file_regular?: (String.t() -> boolean()),
+          executable?: (String.t() -> boolean()),
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
@@ -64,12 +66,9 @@ defmodule SymphonyElixir.CLI do
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+      case preflight_executables(expanded_path, deps) do
+        :ok -> ensure_started(deps.ensure_all_started.(), expanded_path)
+        error -> error
       end
     else
       {:error, "Workflow file not found: #{expanded_path}"}
@@ -85,11 +84,69 @@ defmodule SymphonyElixir.CLI do
   defp runtime_deps(ensure_all_started \\ fn -> Application.ensure_all_started(:symphony_elixir) end) do
     %{
       file_regular?: &File.regular?/1,
+      executable?: &(System.find_executable(&1) != nil),
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: ensure_all_started
     }
+  end
+
+  defp preflight_executables(workflow_path, deps) do
+    case Map.get(deps, :executable?) do
+      executable? when is_function(executable?, 1) ->
+        required_executables(workflow_path)
+        |> Enum.find_value(:ok, &missing_executable(&1, executable?))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp required_executables(workflow_path) do
+    base = ["git", "sh"]
+
+    case Workflow.load(workflow_path) do
+      {:ok, %{config: config}} ->
+        case Schema.parse(config) do
+          {:ok, settings} ->
+            configured_executables(settings, base)
+
+          {:error, _reason} ->
+            base ++ ["codex"]
+        end
+
+      _ ->
+        base ++ ["codex"]
+    end
+  end
+
+  defp command_executable(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> String.trim("'\"")
+    |> Path.basename()
+  end
+
+  defp command_executable(_command), do: "codex"
+
+  defp configured_executables(settings, base) do
+    codex_executable = command_executable(settings.codex.command)
+    worker_executables = if settings.worker.ssh_hosts == [], do: [], else: ["ssh"]
+
+    Enum.uniq([codex_executable | base ++ worker_executables])
+  end
+
+  defp missing_executable(executable, executable?) do
+    if executable?.(executable), do: nil, else: {:error, "Required executable not found: #{executable}"}
+  end
+
+  defp ensure_started({:ok, _started_apps}, _workflow_path), do: :ok
+
+  defp ensure_started({:error, reason}, workflow_path) do
+    {:error, "Failed to start Symphony with workflow #{workflow_path}: #{inspect(reason)}"}
   end
 
   defp maybe_set_logs_root(opts, deps) do

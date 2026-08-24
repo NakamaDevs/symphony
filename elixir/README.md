@@ -195,10 +195,14 @@ codex:
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
+- Startup checks the configured Codex command, `git`, and `sh`. It also checks `ssh` when SSH
+  workers are configured. Missing executables stop startup with a clear error.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The API also exposes
+  `POST /api/v1/emergency-stop` to stop active work, clear retries, clean matching workspaces, and
+  pause dispatch. Use `POST /api/v1/resume` to enable dispatch again.
 
 ### Linear adapter profile
 

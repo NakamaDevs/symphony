@@ -59,6 +59,36 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  defmodule ControlOrchestrator do
+    use GenServer
+
+    def start_link(opts) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.start_link(__MODULE__, :ok, name: name)
+    end
+
+    def init(:ok), do: {:ok, :ok}
+
+    def handle_call(:emergency_stop, _from, state) do
+      reply = %{
+        stopped: true,
+        paused: true,
+        running: 1,
+        blocked: 0,
+        retrying: 0,
+        requested_at: DateTime.utc_now()
+      }
+
+      {:reply, reply, state}
+    end
+
+    def handle_call(:resume, _from, state) do
+      {:reply, %{resumed: true, paused: false, requested_at: DateTime.utc_now()}, state}
+    end
+
+    def handle_call(:snapshot, _from, state), do: {:reply, %{running: [], retrying: [], blocked: []}, state}
+  end
+
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
 
@@ -412,6 +442,21 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "phoenix observability api exposes emergency stop and resume controls" do
+    orchestrator_name = Module.concat(__MODULE__, :ControlApiOrchestrator)
+    {:ok, _pid} = ControlOrchestrator.start_link(name: orchestrator_name)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert %{"stopped" => true, "paused" => true, "running" => 1} =
+             json_response(post(build_conn(), "/api/v1/emergency-stop", %{}), 202)
+
+    assert %{"resumed" => true, "paused" => false} =
+             json_response(post(build_conn(), "/api/v1/resume", %{}), 202)
+
+    assert json_response(get(build_conn(), "/api/v1/emergency-stop"), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
   end
 
   test "phoenix observability api preserves snapshot timeout behavior" do

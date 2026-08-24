@@ -125,6 +125,25 @@ defmodule SymphonyElixir.CLITest do
     assert message =~ ":boom"
   end
 
+  test "fails before startup when a configured executable is missing" do
+    workflow_path = Path.join(System.tmp_dir!(), "symphony-cli-#{System.unique_integer([:positive])}.md")
+    File.write!(workflow_path, "---\ncodex:\n  command: missing-codex\n---\nPrompt\n")
+
+    on_exit(fn -> File.rm(workflow_path) end)
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      executable?: fn executable -> executable != "missing-codex" end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> flunk("startup must not run after preflight failure") end
+    }
+
+    assert {:error, "Required executable not found: missing-codex"} =
+             CLI.run(workflow_path, deps)
+  end
+
   test "returns ok when workflow exists and app starts" do
     deps = %{
       file_regular?: fn _path -> true end,
